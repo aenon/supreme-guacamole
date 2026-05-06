@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import asyncio, difflib, json, os, re, shlex, subprocess
+import asyncio, difflib, json, os, re, shlex, subprocess, time
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import AsyncIterator, Iterator
@@ -513,7 +513,8 @@ class MinicodeApp(App):
     #input { dock: bottom; height: 3; margin: 0 1; }
     """
 
-    config: Config = field(default_factory=Config)
+    config: Config = Config()
+    cli_prompt_id: str = "default"
     model_name: reactive[str] = reactive("\u2014")
     token_pct: reactive[float] = reactive(0.0)
     tool_count: reactive[int] = reactive(0)
@@ -536,6 +537,8 @@ class MinicodeApp(App):
         if self.config.debug:
             self.notify(f"Loaded {len(self.system_msgs)} system prompt(s), "
                         f"model={self.config.model or '(not set)'}")
+        self._refresh_status()
+        self.query_one("#input", Input).focus()
 
     # ── Status bar ──────────────────────────────────────────────────────
 
@@ -690,13 +693,24 @@ class MinicodeApp(App):
 
             chat.write("\n[bold]Assistant:[/] ")
             try:
+                batch = ""
+                last_flush = time.monotonic()
                 async for event in stream_completion(self.config, messages, tools_def):
                     if event["type"] == "text":
                         assistant_text += event["content"]
-                        chat.write(event["content"])
+                        batch += event["content"]
+                        now = time.monotonic()
+                        if now - last_flush > 0.05:
+                            chat.write(batch)
+                            batch = ""
+                            last_flush = now
                     elif event["type"] == "tool_use":
+                        if batch:
+                            chat.write(batch); batch = ""
                         tool_calls.append(event)
                     elif event["type"] == "done":
+                        if batch:
+                            chat.write(batch)
                         break
             except Exception as e:
                 chat.write(f"\n[red]API error: {e}[/]")
