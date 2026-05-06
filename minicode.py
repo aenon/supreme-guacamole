@@ -577,6 +577,8 @@ class MinicodeApp(App):
             self.exit()
         elif cmd == "clear":
             chat.clear()
+            self.history.clear()
+            self._refresh_status()
         elif cmd == "model":
             if args:
                 self.model_name = args
@@ -611,7 +613,13 @@ class MinicodeApp(App):
                        f"api={c.api_base or '(not set)'}  "
                        f"max_tokens={c.max_tokens}  reserve={c.context_reserve}[/]")
         elif cmd == "compact":
-            chat.write("[dim]Compaction will run on next message (agent loop not yet wired)[/]")
+            if self.history:
+                self.compacting = True
+                self.query_one("#input", Input).disabled = True
+                chat.write("[dim yellow]⟳ Compacting…[/]")
+                asyncio.create_task(self._manual_compact())
+            else:
+                chat.write("[dim]Nothing to compact[/]")
         else:
             chat.write(f"[dim]Unknown command: /{cmd}.  /help for list[/]")
 
@@ -634,6 +642,137 @@ class MinicodeApp(App):
     def on_message_submitted(self, event: MessageSubmitted) -> None:
         chat = self.query_one("#messages", RichLog)
         chat.write(f"\n[bold cyan]You:[/] {event.content}")
+        self.query_one("#input", Input).disabled = True
+        asyncio.create_task(self._run_agent_loop(event.content))
+
+    # ── Agent Loop ────────────────────────────────────────────────────────
+
+    async def _run_agent_loop(self, user_content: str) -> None:
+        """Run one user message through the full agent loop."""
+        inp = self.query_one("#input", Input)
+        chat = self.query_one("#messages", RichLog)
+        try:
+            await self._agent_turn(chat, user_content)
+        except Exception as e:
+            chat.write(f"\n[red]Unexpected error: {e}[/]")
+        finally:
+            inp.disabled = False
+            inp.focus()
+
+    async def _agent_turn(self, chat: RichLog, user_content: str) -> None:
+        if not self.config.api_key:
+            chat.write("\n[red]No API key. Set MINICODE_API_KEY in .env[/]"); return
+        if not self.config.model:
+            chat.write("\n[red]No model. Set MINICODE_MODEL in .env or /model[/]"); return
+
+        self.history.append({"role": "user", "content": user_content})
+
+        # Context pressure check → auto-compact
+        sys_tokens = estimate_messages_tokens(self.system_msgs)
+        if self.config.auto_compact and self.ctx.needs_compact(sys_tokens, self.history):
+            self.compacting = True
+            chat.write("\n[dim yellow]⟳ Compacting context…[/]")
+            try:
+                compacted = await self.ctx.compact(self.system_msgs + self.history, self.config)
+                self.history = [m for m in compacted
+                                if m["role"] != "system"
+                                or m.get("content", "").startswith("[Compacted")]
+            except Exception:
+                pass
+            self.compacting = False
+
+        # Tool loop
+        tools_def = self.tools.definitions()
+        max_rounds = MAX_TOOL_ROUNDS
+        for _ in range(max_rounds):
+            messages = self.system_msgs + self.history
+            assistant_text = ""
+            tool_calls: list[dict] = []
+
+            chat.write("\n[bold]Assistant:[/] ")
+            try:
+                async for event in stream_completion(self.config, messages, tools_def):
+                    if event["type"] == "text":
+                        assistant_text += event["content"]
+                        chat.write(event["content"])
+                    elif event["type"] == "tool_use":
+                        tool_calls.append(event)
+                    elif event["type"] == "done":
+                        break
+            except Exception as e:
+                chat.write(f"\n[red]API error: {e}[/]")
+                self.history.append({"role": "assistant", "content": assistant_text or f"(error: {e})"})
+                break
+
+            if not tool_calls:
+                chat.write("\n")
+                self.history.append({"role": "assistant", "content": assistant_text})
+                break
+
+            # Render tool calls
+            chat.write("\n")
+            tc_msgs: list[dict] = []
+            for tc in tool_calls:
+                tc_msgs.append({
+                    "id": tc["id"], "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]}
+                })
+                chat.write(f"  [dim]● {tc['name']}({tc['arguments'][:200]})[/]\n")
+
+            self.history.append({
+                "role": "assistant", "content": assistant_text or None,
+                "tool_calls": tc_msgs
+            })
+
+            # Execute tools + feed results
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                result = await self.tools.execute(tc["name"], args)
+                status = "[green]✓[/]" if result.success else "[red]✗[/]"
+                output_lines = result.output.split("\n")[:10]
+                preview = "\n    ".join(output_lines)
+                if len(result.output.split("\n")) > 10:
+                    preview += "\n    …"
+                chat.write(f"    {status} {preview}\n")
+                if result.error:
+                    chat.write(f"    [red]{result.error}[/]\n")
+                self.history.append({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "content": result.output
+                })
+        else:
+            # Exceeded max rounds
+            chat.write("\n[dim yellow](max tool rounds reached)[/]")
+            self.history.append({"role": "assistant", "content": "(max tool rounds)"})
+
+        self._refresh_status()
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _refresh_status(self) -> None:
+        """Update reactive status bar fields from current state."""
+        self.model_name = self.config.model or "\u2014"
+        self.tool_count = len(self.tools._tools)
+        sys_tokens = estimate_messages_tokens(self.system_msgs)
+        self.token_pct = self.ctx.pressure(sys_tokens, self.history) if self.history else 0.0
+
+    async def _manual_compact(self) -> None:
+        """Manual compaction triggered by /compact."""
+        chat = self.query_one("#messages", RichLog)
+        try:
+            compacted = await self.ctx.compact(self.system_msgs + self.history, self.config)
+            self.history = [m for m in compacted
+                            if m["role"] != "system"
+                            or m.get("content", "").startswith("[Compacted")]
+            chat.write(" [dim]done[/]\n")
+        except Exception as e:
+            chat.write(f" [red]failed: {e}[/]\n")
+        self.compacting = False
+        self.query_one("#input", Input).disabled = False
+        self._refresh_status()
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
