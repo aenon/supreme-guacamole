@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx, tiktoken
 from dotenv import load_dotenv
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
@@ -521,6 +521,12 @@ class MinicodeApp(App):
     tool_count: reactive[int] = reactive(0)
     compacting: reactive[bool] = reactive(False)
     _last_ctrl_d: float = 0.0
+
+    def on_key(self, event: events.Key) -> None:
+        """Intercept Ctrl+D before Input consumes it."""
+        if event.key == "ctrl+d":
+            event.stop()
+            self.action_quit_double()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, name=f"{APP_NAME} v{VERSION}")
