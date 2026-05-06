@@ -615,6 +615,7 @@ class MinicodeApp(App):
         elif cmd == "compact":
             if self.history:
                 self.compacting = True
+                self.query_one("#input", Input).disabled = True
                 chat.write("[dim yellow]⟳ Compacting…[/]")
                 asyncio.create_task(self._manual_compact())
             else:
@@ -673,7 +674,9 @@ class MinicodeApp(App):
             chat.write("\n[dim yellow]⟳ Compacting context…[/]")
             try:
                 compacted = await self.ctx.compact(self.system_msgs + self.history, self.config)
-                self.history = [m for m in compacted if m["role"] != "system"]
+                self.history = [m for m in compacted
+                                if m["role"] != "system"
+                                or m.get("content", "").startswith("[Compacted")]
             except Exception:
                 pass
             self.compacting = False
@@ -761,11 +764,14 @@ class MinicodeApp(App):
         chat = self.query_one("#messages", RichLog)
         try:
             compacted = await self.ctx.compact(self.system_msgs + self.history, self.config)
-            self.history = [m for m in compacted if m["role"] != "system"]
+            self.history = [m for m in compacted
+                            if m["role"] != "system"
+                            or m.get("content", "").startswith("[Compacted")]
             chat.write(" [dim]done[/]\n")
         except Exception as e:
             chat.write(f" [red]failed: {e}[/]\n")
         self.compacting = False
+        self.query_one("#input", Input).disabled = False
         self._refresh_status()
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
