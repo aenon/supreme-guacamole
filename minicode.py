@@ -37,8 +37,8 @@ class Config:
     api_base: str = ""
     api_key: str = ""
     model: str = ""
-    max_tokens: int = 4096
-    context_reserve: int = 8192
+    max_tokens: int = 16384
+    context_reserve: int = 65536
     auto_compact: bool = True
     debug: bool = False
 
@@ -62,8 +62,8 @@ def load_config(cli_args: Namespace | None = None) -> Config:
         api_base=os.getenv("MINICODE_API_BASE", ""),
         api_key=os.getenv("MINICODE_API_KEY", ""),
         model=os.getenv("MINICODE_MODEL", ""),
-        max_tokens=int(os.getenv("MINICODE_MAX_TOKENS", "4096")),
-        context_reserve=int(os.getenv("MINICODE_CONTEXT_RESERVE", "8192")),
+        max_tokens=int(os.getenv("MINICODE_MAX_TOKENS", "16384")),
+        context_reserve=int(os.getenv("MINICODE_CONTEXT_RESERVE", "65536")),
         auto_compact=os.getenv("MINICODE_AUTO_COMPACT", "true").lower() != "false",
     )
     if cli_args and cli_args.model:
@@ -170,7 +170,7 @@ MODEL_CTX: dict[str, int] = {
     "gpt-4o": 128_000, "gpt-4o-mini": 128_000, "gpt-4.5": 128_000,
     "gpt-4-turbo": 128_000, "gpt-4": 8_192, "gpt-3.5": 16_385,
     "claude-sonnet-4": 200_000, "claude-3.5": 200_000, "claude-3": 200_000,
-    "claude-opus-4": 200_000, "gemini": 1_000_000, "deepseek": 64_000,
+    "claude-opus-4": 200_000, "gemini": 1_000_000, "deepseek": 1_000_000,
     "llama": 8_192, "qwen": 32_000, "mistral": 32_000, "o": 200_000,
 }
 
