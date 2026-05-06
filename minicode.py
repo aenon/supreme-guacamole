@@ -506,6 +506,7 @@ HELP_TEXT = """\
 # ── TUI App ──────────────────────────────────────────────────────────────────
 
 class MinicodeApp(App):
+    BINDINGS = [("ctrl+d", "quit_double", "Quit (double-tap)")]
     CSS = """
     Screen { layout: vertical; background: $surface; }
     #messages { height: 1fr; border: none; }
@@ -519,6 +520,7 @@ class MinicodeApp(App):
     token_pct: reactive[float] = reactive(0.0)
     tool_count: reactive[int] = reactive(0)
     compacting: reactive[bool] = reactive(False)
+    _last_ctrl_d: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, name=f"{APP_NAME} v{VERSION}")
@@ -539,6 +541,16 @@ class MinicodeApp(App):
                         f"model={self.config.model or '(not set)'}")
         self._refresh_status()
         self.query_one("#input", Input).focus()
+
+    def action_quit_double(self) -> None:
+        """Ctrl+D: first press warns, second press within 1s quits."""
+        now = time.monotonic()
+        if now - self._last_ctrl_d < 1.0:
+            self.exit()
+        else:
+            self._last_ctrl_d = now
+            self.query_one("#messages", RichLog).write(
+                "[dim]Press Ctrl+D again to quit (or /quit)[/]\n")
 
     # ── Status bar ──────────────────────────────────────────────────────
 
@@ -700,7 +712,8 @@ class MinicodeApp(App):
                         assistant_text += event["content"]
                         batch += event["content"]
                         now = time.monotonic()
-                        if now - last_flush > 0.05:
+                        # Flush on newline or every 200ms (whichever comes first)
+                        if "\n" in batch or (now - last_flush > 0.2):
                             chat.write(batch)
                             batch = ""
                             last_flush = now
