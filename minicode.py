@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import asyncio, difflib, json, os, re, shlex, subprocess
+import asyncio, difflib, json, os, re, shlex, subprocess, time
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import AsyncIterator, Iterator
@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx, tiktoken
 from dotenv import load_dotenv
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
@@ -506,6 +506,7 @@ HELP_TEXT = """\
 # ── TUI App ──────────────────────────────────────────────────────────────────
 
 class MinicodeApp(App):
+    BINDINGS = [("ctrl+d", "quit_double", "Quit (double-tap)")]
     CSS = """
     Screen { layout: vertical; background: $surface; }
     #messages { height: 1fr; border: none; }
@@ -513,11 +514,19 @@ class MinicodeApp(App):
     #input { dock: bottom; height: 3; margin: 0 1; }
     """
 
-    config: Config = field(default_factory=Config)
+    config: Config = Config()
+    cli_prompt_id: str = "default"
     model_name: reactive[str] = reactive("\u2014")
     token_pct: reactive[float] = reactive(0.0)
     tool_count: reactive[int] = reactive(0)
     compacting: reactive[bool] = reactive(False)
+    _last_ctrl_d: float = 0.0
+
+    def on_key(self, event: events.Key) -> None:
+        """Intercept Ctrl+D before Input consumes it."""
+        if event.key == "ctrl+d":
+            event.stop()
+            self.action_quit_double()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, name=f"{APP_NAME} v{VERSION}")
@@ -536,6 +545,18 @@ class MinicodeApp(App):
         if self.config.debug:
             self.notify(f"Loaded {len(self.system_msgs)} system prompt(s), "
                         f"model={self.config.model or '(not set)'}")
+        self._refresh_status()
+        self.query_one("#input", Input).focus()
+
+    def action_quit_double(self) -> None:
+        """Ctrl+D: first press warns, second press within 1s quits."""
+        now = time.monotonic()
+        if now - self._last_ctrl_d < 1.0:
+            self.exit()
+        else:
+            self._last_ctrl_d = now
+            self.query_one("#messages", RichLog).write(
+                "[dim]Press Ctrl+D again to quit (or /quit)[/]\n")
 
     # ── Status bar ──────────────────────────────────────────────────────
 
@@ -690,13 +711,25 @@ class MinicodeApp(App):
 
             chat.write("\n[bold]Assistant:[/] ")
             try:
+                batch = ""
+                last_flush = time.monotonic()
                 async for event in stream_completion(self.config, messages, tools_def):
                     if event["type"] == "text":
                         assistant_text += event["content"]
-                        chat.write(event["content"])
+                        batch += event["content"]
+                        now = time.monotonic()
+                        # Flush on newline or every 200ms (whichever comes first)
+                        if "\n" in batch or (now - last_flush > 0.2):
+                            chat.write(batch)
+                            batch = ""
+                            last_flush = now
                     elif event["type"] == "tool_use":
+                        if batch:
+                            chat.write(batch); batch = ""
                         tool_calls.append(event)
                     elif event["type"] == "done":
+                        if batch:
+                            chat.write(batch)
                         break
             except Exception as e:
                 chat.write(f"\n[red]API error: {e}[/]")
