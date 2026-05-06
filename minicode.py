@@ -17,7 +17,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Header, Input, RichLog, Static
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -510,7 +510,7 @@ class MinicodeApp(App):
     Screen { layout: vertical; background: $surface; }
     #messages { height: 1fr; border: none; }
     #status { dock: bottom; height: 1; padding: 0 1; background: $panel; }
-    #input { dock: bottom; height: auto; margin: 0 1; }
+    #input { dock: bottom; height: 3; margin: 0 1; }
     """
 
     config: Config = field(default_factory=Config)
@@ -525,7 +525,6 @@ class MinicodeApp(App):
         yield Static("", id="status")
         yield Input(placeholder="Ask minicode to do something...  /help for commands",
                     id="input")
-        yield Footer()
 
     def on_mount(self) -> None:
         self.title = APP_NAME
