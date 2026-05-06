@@ -17,7 +17,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.widgets import Footer, Header, Input, RichLog, Static
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -509,11 +509,12 @@ class MinicodeApp(App):
     CSS = """
     Screen { layout: vertical; background: $surface; }
     #messages { height: 1fr; border: none; }
+    #status { dock: bottom; height: 1; padding: 0 1; background: $panel; }
     #input { dock: bottom; height: auto; margin: 0 1; }
     """
 
     config: Config = field(default_factory=Config)
-    model_name: reactive[str] = reactive("—")
+    model_name: reactive[str] = reactive("\u2014")
     token_pct: reactive[float] = reactive(0.0)
     tool_count: reactive[int] = reactive(0)
     compacting: reactive[bool] = reactive(False)
@@ -521,6 +522,7 @@ class MinicodeApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, name=f"{APP_NAME} v{VERSION}")
         yield RichLog(id="messages", highlight=True, markup=True, wrap=True)
+        yield Static("", id="status")
         yield Input(placeholder="Ask minicode to do something...  /help for commands",
                     id="input")
         yield Footer()
@@ -539,7 +541,7 @@ class MinicodeApp(App):
     # ── Status bar ──────────────────────────────────────────────────────
 
     def _update_footer(self) -> None:
-        """Render status bar into Footer."""
+        """Render status line into the #status Static widget."""
         pct = min(self.token_pct, 0.999)
         color = "green" if pct < 0.60 else "yellow" if pct < 0.80 else "red"
         parts = [
@@ -550,7 +552,7 @@ class MinicodeApp(App):
         ]
         if self.compacting:
             parts.insert(1, "[bold yellow]⟳[/]")
-        self.query_one(Footer).label = " │ ".join(parts)
+        self.query_one("#status", Static).update(" │ ".join(parts))
 
     def watch_model_name(self) -> None:
         self._update_footer()
@@ -567,7 +569,7 @@ class MinicodeApp(App):
     # ── Slash commands ───────────────────────────────────────────────────
 
     def _handle_command(self, cmd: str, args: str) -> None:
-        """Dispatch a slash command. Returns True if handled."""
+        """Dispatch a slash command."""
         chat = self.query_one("#messages", RichLog)
         if cmd == "help":
             chat.write(HELP_TEXT)
@@ -591,7 +593,10 @@ class MinicodeApp(App):
                 chat.write(f"[dim]Current prompt: {self.cli_prompt_id}[/]")
         elif cmd == "cd":
             if args:
-                p = Path(args).expanduser().resolve()
+                try:
+                    p = Path(args).expanduser().resolve()
+                except ValueError:
+                    chat.write(f"[dim]Invalid path: {args}[/]"); return
                 if p.is_dir():
                     os.chdir(p)
                     chat.write(f"[dim]cwd → {p}[/]")
