@@ -15,9 +15,9 @@ import httpx, tiktoken
 from dotenv import load_dotenv
 from textual import on
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Footer, Header, Input, RichLog
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -478,6 +478,31 @@ class ContextManager:
         return sys_msgs + compacted + protected
 
 
+# ── TUI Messages ──────────────────────────────────────────────────────────────
+
+class MessageSubmitted(Message):
+    """User submitted a chat message (non-command)."""
+    def __init__(self, content: str) -> None:
+        self.content = content
+        super().__init__()
+
+class CommandSubmitted(Message):
+    """User submitted a /slash command."""
+    def __init__(self, command: str, args: str) -> None:
+        self.command = command
+        self.args = args
+        super().__init__()
+
+HELP_TEXT = """\
+[b]/model &lt;name&gt;[/]  Switch model
+[b]/prompt &lt;id&gt;[/]   Switch system prompt
+[b]/compact[/]       Manual context compaction
+[b]/clear[/]         Clear conversation
+[b]/cd &lt;path&gt;[/]     Change working directory
+[b]/env[/]           Show config
+[b]/help[/]          Show this help
+[b]/quit[/]          Exit"""
+
 # ── TUI App ──────────────────────────────────────────────────────────────────
 
 class MinicodeApp(App):
@@ -488,11 +513,16 @@ class MinicodeApp(App):
     """
 
     config: Config = field(default_factory=Config)
+    model_name: reactive[str] = reactive("—")
+    token_pct: reactive[float] = reactive(0.0)
+    tool_count: reactive[int] = reactive(0)
+    compacting: reactive[bool] = reactive(False)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False, name=f"{APP_NAME} v{VERSION}")
-        yield VerticalScroll(id="messages")
-        yield Input(placeholder="Ask minicode to do something...", id="input")
+        yield RichLog(id="messages", highlight=True, markup=True, wrap=True)
+        yield Input(placeholder="Ask minicode to do something...  /help for commands",
+                    id="input")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -503,8 +533,102 @@ class MinicodeApp(App):
         self.ctx = ContextManager(resolve_context_window(self.config.model),
                                   self.config.context_reserve)
         if self.config.debug:
-            self.notify(f"Loaded {len(self.system_msgs)} system prompt(s)")
+            self.notify(f"Loaded {len(self.system_msgs)} system prompt(s), "
+                        f"model={self.config.model or '(not set)'}")
 
+    # ── Status bar ──────────────────────────────────────────────────────
+
+    def _update_footer(self) -> None:
+        """Render status bar into Footer."""
+        pct = min(self.token_pct, 0.999)
+        color = "green" if pct < 0.60 else "yellow" if pct < 0.80 else "red"
+        parts = [
+            f"[bold]{self.model_name}[/]",
+            f"ctx: [{color}]{pct:.0%}[/]",
+            f"tools: {self.tool_count}",
+            str(Path.cwd()),
+        ]
+        if self.compacting:
+            parts.insert(1, "[bold yellow]⟳[/]")
+        self.query_one(Footer).label = " │ ".join(parts)
+
+    def watch_model_name(self) -> None:
+        self._update_footer()
+
+    def watch_token_pct(self) -> None:
+        self._update_footer()
+
+    def watch_tool_count(self) -> None:
+        self._update_footer()
+
+    def watch_compacting(self) -> None:
+        self._update_footer()
+
+    # ── Slash commands ───────────────────────────────────────────────────
+
+    def _handle_command(self, cmd: str, args: str) -> None:
+        """Dispatch a slash command. Returns True if handled."""
+        chat = self.query_one("#messages", RichLog)
+        if cmd == "help":
+            chat.write(HELP_TEXT)
+        elif cmd == "quit":
+            self.exit()
+        elif cmd == "clear":
+            chat.clear()
+        elif cmd == "model":
+            if args:
+                self.model_name = args
+                self.config.model = args
+                chat.write(f"[dim]Model switched to {args}[/]")
+            else:
+                chat.write(f"[dim]Current model: {self.model_name}[/]")
+        elif cmd == "prompt":
+            if args:
+                self.cli_prompt_id = args
+                self.system_msgs = collect_prompts(Path.cwd(), args)
+                chat.write(f"[dim]Prompt switched to {args} ({len(self.system_msgs)} message(s))[/]")
+            else:
+                chat.write(f"[dim]Current prompt: {self.cli_prompt_id}[/]")
+        elif cmd == "cd":
+            if args:
+                p = Path(args).expanduser().resolve()
+                if p.is_dir():
+                    os.chdir(p)
+                    chat.write(f"[dim]cwd → {p}[/]")
+                    self._update_footer()
+                else:
+                    chat.write(f"[dim]not a directory: {args}[/]")
+            else:
+                chat.write(f"[dim]cwd: {Path.cwd()}[/]")
+        elif cmd == "env":
+            c = self.config
+            chat.write(f"[dim]model={c.model or '(not set)'}  "
+                       f"api={c.api_base or '(not set)'}  "
+                       f"max_tokens={c.max_tokens}  reserve={c.context_reserve}[/]")
+        elif cmd == "compact":
+            chat.write("[dim]Compaction will run on next message (agent loop not yet wired)[/]")
+        else:
+            chat.write(f"[dim]Unknown command: /{cmd}.  /help for list[/]")
+
+    # ── Input handling ───────────────────────────────────────────────────
+
+    @on(Input.Submitted)
+    def on_input(self, event: Input.Submitted) -> None:
+        value = event.value.strip()
+        if not value:
+            return
+        event.input.clear()
+        if value.startswith("/"):
+            parts = value[1:].split(maxsplit=1)
+            cmd = parts[0].lower()
+            args = parts[1] if len(parts) > 1 else ""
+            self._handle_command(cmd, args)
+        else:
+            self.post_message(MessageSubmitted(value))
+
+    def on_message_submitted(self, event: MessageSubmitted) -> None:
+        chat = self.query_one("#messages", RichLog)
+        chat.write(f"\n[bold cyan]You:[/] {event.content}")
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
